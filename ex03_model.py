@@ -42,5 +42,6 @@ class ShallowCNN(nn.Module):
         #  (You can also reuse your implementation of 'self.get_logits(x)' if this helps you.)
         x = self.get_logits(x)
         if y is None:
-            torch.logsumexp(x)
-        pass
+            return torch.logsumexp(x)
+        else:
+            return torch.sum(x * y)
