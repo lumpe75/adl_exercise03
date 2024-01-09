@@ -40,8 +40,9 @@ class ShallowCNN(nn.Module):
         # TODO (3.2): Implement forward function for (1) EBM, (2) Unconditional JEM, (3) Conditional JEM.
         #  Consider using F.adaptive_avg_pool2d to convert between the 2D features and a linear representation.
         #  (You can also reuse your implementation of 'self.get_logits(x)' if this helps you.)
-        x = self.get_logits(x)
         if y is None:
-            return torch.logsumexp(x)
+            print('Hallo')
+            return torch.logsumexp(self.get_logits(x))
         else:
-            return torch.sum(x * y)
+            print('Hallo')
+            return self.get_logits(x)

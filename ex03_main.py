@@ -38,30 +38,18 @@ from ex03_ood import score_fn
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Configure training/inference/sampling for EBMs')
-    parser.add_argument('--data_dir', type=str, default="./data",
-                        help='path to directory with glyph image data')
-    parser.add_argument('--ckpt_dir', type=str, default="./saved_models",
-                        help='path to directory where model checkpoints are stored')
-    parser.add_argument('--batch_size', type=int, default=32,
-                        help='input batch size for training (default: 32)')
-    parser.add_argument('--num_epochs', type=int, default=120,
-                        help='number of epochs to train (default: 120)')
-    parser.add_argument('--cbuffer_size', type=int, default=128,
-                        help='num. images per class in the sampling reservoir (default: 128)')
-    parser.add_argument('--lr', type=float, default=1e-4,
-                        help='learning rate (default: 1e-4)')
-    parser.add_argument('--lr_gamma', type=float, default=0.97,
-                        help='exponentional learning rate decay factor (default: 0.97)')
-    parser.add_argument('--lr_stepsize', type=int, default=2,
-                        help='learning rate decay step size (default: 2)')
-    parser.add_argument('--alpha', type=int, default=0.1,
-                        help='strength of L2 regularization (default: 0.1)')
-    parser.add_argument('--num_classes', type=int, default=42,
-                        help='number of output nodes/classes (default: 1 (EBM), 42 (JEM))')
-    parser.add_argument('--ccond_sample', type=bool, default=False,
-                        help='flag that specifies class-conditional or unconditional sampling (default: false')
-    parser.add_argument('--num_workers', type=int, default="0",
-                        help='number of loading workers, needs to be 0 for Windows')
+    parser.add_argument('--data_dir', type=str, default="./data", help='path to directory with glyph image data')
+    parser.add_argument('--ckpt_dir', type=str, default="./saved_models", help='path to directory where model checkpoints are stored')
+    parser.add_argument('--batch_size', type=int, default=32, help='input batch size for training (default: 32)')
+    parser.add_argument('--num_epochs', type=int, default=120, help='number of epochs to train (default: 120)')
+    parser.add_argument('--cbuffer_size', type=int, default=128, help='num. images per class in the sampling reservoir (default: 128)')
+    parser.add_argument('--lr', type=float, default=1e-4, help='learning rate (default: 1e-4)')
+    parser.add_argument('--lr_gamma', type=float, default=0.97, help='exponentional learning rate decay factor (default: 0.97)')
+    parser.add_argument('--lr_stepsize', type=int, default=2, help='learning rate decay step size (default: 2)')
+    parser.add_argument('--alpha', type=int, default=0.1, help='strength of L2 regularization (default: 0.1)')
+    parser.add_argument('--num_classes', type=int, default=42, help='number of output nodes/classes (default: 1 (EBM), 42 (JEM))')
+    parser.add_argument('--ccond_sample', type=bool, default=False, help='flag that specifies class-conditional or unconditional sampling (default: false')
+    parser.add_argument('--num_workers', type=int, default="0", help='number of loading workers, needs to be 0 for Windows')
     return parser.parse_args()
 
 
