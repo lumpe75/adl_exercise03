@@ -38,7 +38,7 @@ from ex03_ood import score_fn
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Configure training/inference/sampling for EBMs')
-    parser.add_argument('--data_dir', type=str, default="./data",
+    parser.add_argument('--data_dir', type=str, default="/proj/aimi-adl/GLYPHS/",
                         help='path to directory with glyph image data')
     parser.add_argument('--ckpt_dir', type=str, default="./saved_models",
                         help='path to directory where model checkpoints are stored')
@@ -82,6 +82,7 @@ class MCMCSampler:
         self.sample_size = sample_size
         self.num_classes = num_classes
         self.cbuffer_size = cbuffer_size
+        self.full_buffer = torch.randn(self.sample_size, 3, *self.img_shape)*0.01
 
     def synthesize_samples(self, clabel=None, steps=60, step_size=10, return_img_per_step=False):
         """
@@ -106,7 +107,6 @@ class MCMCSampler:
         torch.set_grad_enabled(True)
 
         # TODO (3.3): Implement SGLD-based synthesis with reservoir sampling
-
         # Sample initial data points x^0 to get a starting point for the sampling process.
         # As seen in the lecture and the theoretical recap, there exist multiple variants how we can approach this task.
 
@@ -119,35 +119,46 @@ class MCMCSampler:
         # each SGLD procedure. In the class-conditional setting, you want to have individual buffers per class.
         # Please make sure that you keep the buffer finite to not run into memory-related problems.
 
-        inp_imgs = None  # corresponds to the initial sample(s) x^0
+        nr_from_buffer = torch.round(0.8 * self.sample_size)
+        nr_from_noise = self.sample_size - nr_from_buffer
+
+        from_noise = torch.randn(nr_from_noise, 3, *self.img_shape)*0.01
+        from_buffer = self.full_buffer[:nr_from_buffer, :, :, :]
+        inp_imgs = torch.concatenate((from_noise, from_buffer), dim=0)
+
         inp_imgs.requires_grad = True
 
         # List for storing generations at each step
         imgs_per_step = []
-
+        #noise = torch.randn((3, *self.img_shape))
         # Execute K MCMC steps
         for _ in range(steps):
-            # (1) Add small noise to the input 'inp_imgs' (which are normalized to a range of -1 to 1).
+            # (1) Add small noise to the input 'inp_imgs' (which are normalized to a range of -1 to 1). TODO: fix later
             # This corresponds to the Brownian noise that allows to explore the entire parameter space.
+            epsilon_noise = torch.randn(self.sample_size, 3, *self.img_shape) * step_size
 
             # (2) Calculate gradient-based score function at the current step. In case of the JEM implementation AND
             # class-conditional sampling (which is optional from a methodological point of view), make sure that you
             # plug in some label information as well as we want to calculate E(x,y) and not only E(x).
+            inp_imgs = self.model(inp_imgs, clabel)
 
             # (3) Perform gradient ascent to regions of higher probability
             # (gradient descent if we consider the energy surface!). You can use the parameter 'step_size' which can be
             # considered the learning rate of the SGLD update.
+            inp_grad = self.model.backward(inp_imgs)
+
+            inp_imgs = inp_imgs - inp_grad + epsilon_noise
 
             # (4) Optional: save (detached) intermediate images in the imgs_per_step variable
             if return_img_per_step:
-                pass
+                imgs_per_step.append(inp_imgs)
 
         for p in self.model.parameters():
             p.requires_grad = True
         self.model.train(is_training)
 
         torch.set_grad_enabled(had_gradients_enabled)
-
+        print("LAND IN SICHT!")
         if return_img_per_step:
             return torch.stack(imgs_per_step, dim=0)
         else:
@@ -448,10 +459,10 @@ if __name__ == '__main__':
     run_training(args)
 
     # 2) Evaluate model
-    #ckpt_path: str = ""
+    ckpt_path: str = ""
 
     # Classification performance
-    #run_evaluation(args, ckpt_path)
+    run_evaluation(args, ckpt_path)
 
     # Image synthesis
     #run_generation(args, ckpt_path, conditional=True)
