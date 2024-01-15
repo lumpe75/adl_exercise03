@@ -5,6 +5,7 @@ import tqdm
 import pandas as pd
 import argparse
 from typing import Union, Dict
+import math
 
 ## Imports for plotting
 import matplotlib.pyplot as plt
@@ -38,30 +39,18 @@ from ex03_ood import score_fn
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Configure training/inference/sampling for EBMs')
-    parser.add_argument('--data_dir', type=str, default="/proj/aimi-adl/GLYPHS/",
-                        help='path to directory with glyph image data')
-    parser.add_argument('--ckpt_dir', type=str, default="./saved_models",
-                        help='path to directory where model checkpoints are stored')
-    parser.add_argument('--batch_size', type=int, default=32,
-                        help='input batch size for training (default: 32)')
-    parser.add_argument('--num_epochs', type=int, default=120,
-                        help='number of epochs to train (default: 120)')
-    parser.add_argument('--cbuffer_size', type=int, default=128,
-                        help='num. images per class in the sampling reservoir (default: 128)')
-    parser.add_argument('--lr', type=float, default=1e-4,
-                        help='learning rate (default: 1e-4)')
-    parser.add_argument('--lr_gamma', type=float, default=0.97,
-                        help='exponentional learning rate decay factor (default: 0.97)')
-    parser.add_argument('--lr_stepsize', type=int, default=2,
-                        help='learning rate decay step size (default: 2)')
-    parser.add_argument('--alpha', type=int, default=0.1,
-                        help='strength of L2 regularization (default: 0.1)')
-    parser.add_argument('--num_classes', type=int, default=42,
-                        help='number of output nodes/classes (default: 1 (EBM), 42 (JEM))')
-    parser.add_argument('--ccond_sample', type=bool, default=False,
-                        help='flag that specifies class-conditional or unconditional sampling (default: false')
-    parser.add_argument('--num_workers', type=int, default="0",
-                        help='number of loading workers, needs to be 0 for Windows')
+    parser.add_argument('--data_dir', type=str, default="/proj/aimi-adl/GLYPHS/", help='path to directory with glyph image data')
+    parser.add_argument('--ckpt_dir', type=str, default="./saved_models", help='path to directory where model checkpoints are stored')
+    parser.add_argument('--batch_size', type=int, default=32, help='input batch size for training (default: 32)')
+    parser.add_argument('--num_epochs', type=int, default=1, help='number of epochs to train (default: 120)')
+    parser.add_argument('--cbuffer_size', type=int, default=128, help='num. images per class in the sampling reservoir (default: 128)')
+    parser.add_argument('--lr', type=float, default=1e-4, help='learning rate (default: 1e-4)')
+    parser.add_argument('--lr_gamma', type=float, default=0.97, help='exponentional learning rate decay factor (default: 0.97)')
+    parser.add_argument('--lr_stepsize', type=int, default=2, help='learning rate decay step size (default: 2)')
+    parser.add_argument('--alpha', type=int, default=0.1, help='strength of L2 regularization (default: 0.1)')
+    parser.add_argument('--num_classes', type=int, default=42, help='number of output nodes/classes (default: 1 (EBM), 42 (JEM))')
+    parser.add_argument('--ccond_sample', type=bool, default=False, help='flag that specifies class-conditional or unconditional sampling (default: false')
+    parser.add_argument('--num_workers', type=int, default="0", help='number of loading workers, needs to be 0 for Windows')
     return parser.parse_args()
 
 
@@ -82,7 +71,7 @@ class MCMCSampler:
         self.sample_size = sample_size
         self.num_classes = num_classes
         self.cbuffer_size = cbuffer_size
-        self.full_buffer = torch.randn(self.sample_size, 3, *self.img_shape)*0.01
+        self.full_buffer = torch.randn(self.sample_size, 1, *self.img_shape[1:]) * 0.01
 
     def synthesize_samples(self, clabel=None, steps=60, step_size=10, return_img_per_step=False):
         """
@@ -119,10 +108,10 @@ class MCMCSampler:
         # each SGLD procedure. In the class-conditional setting, you want to have individual buffers per class.
         # Please make sure that you keep the buffer finite to not run into memory-related problems.
 
-        nr_from_buffer = torch.round(0.8 * self.sample_size)
+        nr_from_buffer = round(0.8 * self.sample_size)
         nr_from_noise = self.sample_size - nr_from_buffer
 
-        from_noise = torch.randn(nr_from_noise, 3, *self.img_shape)*0.01
+        from_noise = torch.randn(nr_from_noise, 1, *self.img_shape[1:]) * 0.01
         from_buffer = self.full_buffer[:nr_from_buffer, :, :, :]
         inp_imgs = torch.concatenate((from_noise, from_buffer), dim=0)
 
@@ -130,12 +119,12 @@ class MCMCSampler:
 
         # List for storing generations at each step
         imgs_per_step = []
-        #noise = torch.randn((3, *self.img_shape))
+        # noise = torch.randn((3, *self.img_shape))
         # Execute K MCMC steps
         for _ in range(steps):
             # (1) Add small noise to the input 'inp_imgs' (which are normalized to a range of -1 to 1). TODO: fix later
             # This corresponds to the Brownian noise that allows to explore the entire parameter space.
-            epsilon_noise = torch.randn(self.sample_size, 3, *self.img_shape) * step_size
+            epsilon_noise = torch.randn(self.sample_size, 1, *self.img_shape[1:]) * step_size
 
             # (2) Calculate gradient-based score function at the current step. In case of the JEM implementation AND
             # class-conditional sampling (which is optional from a methodological point of view), make sure that you
@@ -177,6 +166,8 @@ class JEM(pl.LightningModule):
         self.ccond_sample = ccond_sample
         self.cnn = ShallowCNN(**MODEL_args)
 
+        self.cross_entropy_loss = torch.nn.CrossEntropyLoss()
+
         # During training, we want to use the MCMC-based sampler to synthesize images from the current q_\theta and
         # use these in the contrastive loss functional to update the model parameters \theta.
         # (Intuitively, we alternate between sampling from q_\theta and updating q_\theta, which is a quite challenging
@@ -193,11 +184,14 @@ class JEM(pl.LightningModule):
         # end of each epoch.
         #         self.log_dict(self.train_metrics, on_step=False, on_epoch=True)
         # Please refer to the torchmetrics documentation if this process is not clear.
-        metrics = torchmetrics.MetricCollection([torchmetrics.CohenKappa(num_classes=num_classes,task='multiclass'),
-                                                 torchmetrics.AveragePrecision(num_classes=num_classes,task='multiclass'),
-                                                 torchmetrics.AUROC(num_classes=num_classes,task='multiclass'),
-                                                 torchmetrics.MatthewsCorrCoef(num_classes=num_classes,task='multiclass'),
-                                                 torchmetrics.CalibrationError(task='multiclass',num_classes=num_classes)])
+        metrics = torchmetrics.MetricCollection([torchmetrics.CohenKappa(num_classes=num_classes, task='multiclass'),
+                                                 torchmetrics.AveragePrecision(num_classes=num_classes,
+                                                                               task='multiclass'),
+                                                 torchmetrics.AUROC(num_classes=num_classes, task='multiclass'),
+                                                 torchmetrics.MatthewsCorrCoef(num_classes=num_classes,
+                                                                               task='multiclass'),
+                                                 torchmetrics.CalibrationError(task='multiclass',
+                                                                               num_classes=num_classes)])
         dyna_metrics = [torchmetrics.Accuracy,
                         torchmetrics.Precision,
                         torchmetrics.Recall,
@@ -208,11 +202,13 @@ class JEM(pl.LightningModule):
         self.valid_metrics = metrics.clone(prefix='val_')
         for mode in ['micro', 'macro']:
             self.train_metrics.add_metrics(
-                {f"{mode}_{m.__name__}": m(average=mode, num_classes=num_classes,task='multiclass') for m in dyna_metrics})
+                {f"{mode}_{m.__name__}": m(average=mode, num_classes=num_classes, task='multiclass') for m in
+                 dyna_metrics})
             self.valid_metrics.add_metrics(
-                {f"{mode}_{m.__name__}": m(average=mode, num_classes=num_classes,task='multiclass') for m in dyna_metrics})
+                {f"{mode}_{m.__name__}": m(average=mode, num_classes=num_classes, task='multiclass') for m in
+                 dyna_metrics})
 
-        self.hp_metric = torchmetrics.AveragePrecision(num_classes=num_classes,task='multiclass')
+        self.hp_metric = torchmetrics.AveragePrecision(num_classes=num_classes, task='multiclass')
 
     def forward(self, x, labels=None):
         z = self.cnn(x, labels)
@@ -238,13 +234,16 @@ class JEM(pl.LightningModule):
         #         reg_loss = self.hparams.alpha * (real_out ** 2 + synth_out ** 2).mean()
         #         cdiv_loss = ...
         #         loss = reg_loss + cdiv_loss
-        loss = None
-        return loss
+        real, synth = self.cnn(batch[0]), self.cnn(self.sampler.synthesize_samples())
+        reg_loss, div_loss = (real ** 2 + synth ** 2).mean(), (real + synth).mean()
+        return self.hparams.alpha * (reg_loss + div_loss)
 
     def pyx_step(self, batch):
         # TODO (3.4): Implement p(y|x) step.
         # Here, we want to calculate the classification loss using the class logits infered by the neural network.
-        loss = None
+        predicted = self.cnn.get_logits(batch[0])
+        target = batch[1]
+        loss = self.cross_entropy_loss(predicted.to(torch.float32), torch.nn.functional.one_hot(target, num_classes=self.num_classes).to(torch.float32))
         return loss
 
     def training_step(self, batch, batch_idx):
@@ -253,8 +252,7 @@ class JEM(pl.LightningModule):
         # Here, we specify the update equation used to tune the model parameters.
         # Ideally, we only need to call the px_step() and pyx_step() methods and combine their loss terms to build up
         # the factorized joint density loss introduced by Gratwohl et al. .
-        loss = None
-        return loss
+        return self.pyx_step(batch) + self.px_step(batch)
 
     def validation_step(self, batch, batch_idx, dataset_idx=None):
         # Note: batch_idx and dataset_idx not needed (just there for PyTorch
@@ -298,17 +296,19 @@ def run_training(args) -> pl.LightningModule:
                                  num_workers=num_workers)
 
     trainer = pl.Trainer(default_root_dir=ckpt_dir,
-                         #gpus=1 if str(device).startswith("cuda") else 0,
+                         # gpus=1 if str(device).startswith("cuda") else 0,
                          max_epochs=num_epochs,
-                         gradient_clip_val=0.1,
+                         gradient_clip_val=0.1)
+    '''
                          callbacks=[
                              ModelCheckpoint(save_weights_only=True, mode="min", monitor='val_contrastive_divergence',
                                              filename='val_condiv_{epoch}-{step}'),
-                             ModelCheckpoint(save_weights_only=True, mode="max", monitor='val_MulticlassAveragePrecision',
+                             ModelCheckpoint(save_weights_only=True, mode="max",
+                                             monitor='val_MulticlassAveragePrecision',
                                              filename='val_mAP_{epoch}-{step}'),
                              ModelCheckpoint(save_weights_only=True, filename='last_{epoch}-{step}'),
                              LearningRateMonitor("epoch")
-                         ])
+                         ]'''
     pl.seed_everything(42)
     model = JEM(num_epochs=num_epochs,
                 img_shape=(1, 56, 56),
@@ -358,7 +358,8 @@ def run_generation(args, ckpt_path: Union[str, Path], conditional: bool = False)
     synth_imgs = []
     for label in tqdm.tqdm(conditional_labels):
         clabel = (torch.ones(bs) * label).type(torch.LongTensor).to(model.device)
-        generated_imgs = gen_imgs(model, clabel=clabel if conditional else None, step_size=10, batch_size=bs, num_steps=num_steps).cpu()
+        generated_imgs = gen_imgs(model, clabel=clabel if conditional else None, step_size=10, batch_size=bs,
+                                  num_steps=num_steps).cpu()
         synth_imgs.append(generated_imgs[-1])
 
         # Visualize sampling process
@@ -411,7 +412,7 @@ def run_evaluation(args, ckpt_path: Union[str, Path]):
     test_loader = data.DataLoader(datasets['test'], batch_size=batch_size, shuffle=False, drop_last=False,
                                   num_workers=num_workers)
 
-    trainer = pl.Trainer() #gpus=1 if str(device).startswith("cuda") else 0)
+    trainer = pl.Trainer()  # gpus=1 if str(device).startswith("cuda") else 0)
     results = trainer.validate(model, dataloaders=test_loader)
     print(results)
     return results
@@ -465,8 +466,8 @@ if __name__ == '__main__':
     run_evaluation(args, ckpt_path)
 
     # Image synthesis
-    #run_generation(args, ckpt_path, conditional=True)
-    #run_generation(args, ckpt_path, conditional=False)
+    # run_generation(args, ckpt_path, conditional=True)
+    # run_generation(args, ckpt_path, conditional=False)
 
     # OOD Analysis
-    #run_ood_analysis(args, ckpt_path)
+    # run_ood_analysis(args, ckpt_path)
