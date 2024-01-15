@@ -34,7 +34,7 @@ class ShallowCNN(nn.Module):
 
     @torch.no_grad()
     def get_logits(self, x):
-        return self.fc_layers(F.adaptive_avg_pool2d(self.cnn_layers(x), 1)).cpu().to_mkldnn()
+        return self.fc_layers(F.adaptive_avg_pool2d(self.cnn_layers(x), 1))
 
     def forward(self, x, y=None) -> torch.Tensor:
         x = self.get_logits(x)

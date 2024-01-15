@@ -71,7 +71,12 @@ class MCMCSampler:
         self.sample_size = sample_size
         self.num_classes = num_classes
         self.cbuffer_size = cbuffer_size
-        self.full_buffer = torch.randn(self.sample_size, 1, *self.img_shape[1:]) * 0.01
+        self.full_buffer = self.get_random_dist() * 0.01
+
+        self.cross_entropy_loss = torch.nn.CrossEntropyLoss()
+
+    def get_random_dist(self):
+        return torch.randn(self.sample_size, *self.img_shape)
 
     def synthesize_samples(self, clabel=None, steps=60, step_size=10, return_img_per_step=False):
         """
@@ -111,32 +116,32 @@ class MCMCSampler:
         nr_from_buffer = round(0.8 * self.sample_size)
         nr_from_noise = self.sample_size - nr_from_buffer
 
-        from_noise = torch.randn(nr_from_noise, 1, *self.img_shape[1:]) * 0.01
+        from_noise = self.get_random_dist() * 0.01
+        from_noise = from_noise[:nr_from_noise, :, :, :]
         from_buffer = self.full_buffer[:nr_from_buffer, :, :, :]
         inp_imgs = torch.concatenate((from_noise, from_buffer), dim=0)
-
-        inp_imgs.requires_grad = True
 
         # List for storing generations at each step
         imgs_per_step = []
         # noise = torch.randn((3, *self.img_shape))
+
         # Execute K MCMC steps
         for _ in range(steps):
-            # (1) Add small noise to the input 'inp_imgs' (which are normalized to a range of -1 to 1). TODO: fix later
+            # (1) Add small noise to the input 'inp_imgs' (which are normalized to a range of -1 to 1). TODO: "clamp"
             # This corresponds to the Brownian noise that allows to explore the entire parameter space.
-            epsilon_noise = torch.randn(self.sample_size, 1, *self.img_shape[1:]) * step_size
+            epsilon_noise = self.get_random_dist() * step_size
 
             # (2) Calculate gradient-based score function at the current step. In case of the JEM implementation AND
             # class-conditional sampling (which is optional from a methodological point of view), make sure that you
             # plug in some label information as well as we want to calculate E(x,y) and not only E(x).
-            inp_imgs = self.model(inp_imgs, clabel)
+
+            energy = self.model(inp_imgs.cuda(), clabel)
+            energy.sum().backward()
 
             # (3) Perform gradient ascent to regions of higher probability
             # (gradient descent if we consider the energy surface!). You can use the parameter 'step_size' which can be
             # considered the learning rate of the SGLD update.
-            inp_grad = self.model.backward(inp_imgs)
-
-            inp_imgs = inp_imgs - inp_grad + epsilon_noise
+            inp_imgs = inp_imgs.data - (step_size/2) * inp_imgs.grad + epsilon_noise
 
             # (4) Optional: save (detached) intermediate images in the imgs_per_step variable
             if return_img_per_step:
@@ -151,7 +156,7 @@ class MCMCSampler:
         if return_img_per_step:
             return torch.stack(imgs_per_step, dim=0)
         else:
-            return inp_imgs
+            return inp_imgs.cuda()
 
 
 class JEM(pl.LightningModule):
