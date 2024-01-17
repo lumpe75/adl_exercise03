@@ -32,7 +32,6 @@ class ShallowCNN(nn.Module):
             nn.Linear(self.c_hid3, num_classes)
         )
 
-    @torch.no_grad()
     def get_logits(self, x):
         return self.fc_layers(F.adaptive_avg_pool2d(self.cnn_layers(x), 1))
 

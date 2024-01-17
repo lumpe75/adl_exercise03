@@ -89,17 +89,6 @@ class MCMCSampler:
         :param return_img_per_step: images during MCMC-based synthesis
         :return: synthesized images
         """
-        # Before MCMC: set model parameters to "required_grad=False"
-        # because we are only interested in the gradients of the input.
-        is_training = self.model.training
-        self.model.eval()
-        for p in self.model.parameters():
-            p.requires_grad = False
-
-        # Enable gradient calculation if not already the case
-        had_gradients_enabled = torch.is_grad_enabled()
-        torch.set_grad_enabled(True)
-
         # TODO (3.3): Implement SGLD-based synthesis with reservoir sampling
         # Sample initial data points x^0 to get a starting point for the sampling process.
         # As seen in the lecture and the theoretical recap, there exist multiple variants how we can approach this task.
@@ -119,7 +108,18 @@ class MCMCSampler:
         from_noise = self.get_random_dist() * 0.01
         from_noise = from_noise[:nr_from_noise, :, :, :]
         from_buffer = self.full_buffer[:nr_from_buffer, :, :, :]
-        inp_imgs = torch.concatenate((from_noise, from_buffer), dim=0)
+        inp_imgs = torch.concatenate((from_noise, from_buffer), dim=0).detach().cuda()
+
+        # Before MCMC: set model parameters to "required_grad=False"
+        # because we are only interested in the gradients of the input.
+        is_training = self.model.training
+        self.model.eval()
+        for p in self.model.parameters():
+            p.requires_grad = False
+        inp_imgs.requires_grad = True
+        # Enable gradient calculation if not already the case
+        had_gradients_enabled = torch.is_grad_enabled()
+        torch.set_grad_enabled(True)
 
         # List for storing generations at each step
         imgs_per_step = []
@@ -127,21 +127,31 @@ class MCMCSampler:
 
         # Execute K MCMC steps
         for _ in range(steps):
-            # (1) Add small noise to the input 'inp_imgs' (which are normalized to a range of -1 to 1). TODO: "clamp"
+            # (1) Add small noise to the input 'inp_imgs' (which are normalized to a range of -1 to 1).
             # This corresponds to the Brownian noise that allows to explore the entire parameter space.
-            epsilon_noise = self.get_random_dist() * step_size
+            epsilon_noise = (self.get_random_dist() * step_size).cuda()
+            inp_imgs.data.clamp_(min=-1.0, max=1.0)
 
             # (2) Calculate gradient-based score function at the current step. In case of the JEM implementation AND
             # class-conditional sampling (which is optional from a methodological point of view), make sure that you
             # plug in some label information as well as we want to calculate E(x,y) and not only E(x).
 
-            energy = self.model(inp_imgs.cuda(), clabel)
+            energy = -self.model(inp_imgs)
+            energy.data.requires_grad = True
             energy.sum().backward()
+            inp_imgs.requires_grad = True
+            inp_imgs.sum().backward()
+            inp_imgs.grad.data.clamp_(-0.03, 0.03)
 
             # (3) Perform gradient ascent to regions of higher probability
             # (gradient descent if we consider the energy surface!). You can use the parameter 'step_size' which can be
             # considered the learning rate of the SGLD update.
-            inp_imgs = inp_imgs.data - (step_size/2) * inp_imgs.grad + epsilon_noise
+
+            #inp_imgs = inp_imgs.data - (step_size/2) * inp_imgs.grad.data + epsilon_noise
+            inp_imgs.data.add_(-(step_size / 2) * inp_imgs.grad.data + epsilon_noise)
+            inp_imgs.grad.detach_()
+            inp_imgs.grad.zero_()
+            inp_imgs.data.clamp_(-1.0, 1.0)
 
             # (4) Optional: save (detached) intermediate images in the imgs_per_step variable
             if return_img_per_step:
@@ -152,7 +162,6 @@ class MCMCSampler:
         self.model.train(is_training)
 
         torch.set_grad_enabled(had_gradients_enabled)
-        print("LAND IN SICHT!")
         if return_img_per_step:
             return torch.stack(imgs_per_step, dim=0)
         else:
@@ -239,9 +248,9 @@ class JEM(pl.LightningModule):
         #         reg_loss = self.hparams.alpha * (real_out ** 2 + synth_out ** 2).mean()
         #         cdiv_loss = ...
         #         loss = reg_loss + cdiv_loss
-        real, synth = self.cnn(batch[0]), self.cnn(self.sampler.synthesize_samples())
-        reg_loss, div_loss = (real ** 2 + synth ** 2).mean(), (real + synth).mean()
-        return self.hparams.alpha * (reg_loss + div_loss)
+        real, synth = self.cnn(batch[0]), self.cnn(self.sampler.synthesize_samples())  #TODO maybe add noise?
+        reg_loss, div_loss = self.hparams.alpha * (real ** 2 + synth ** 2).mean(), (real - synth).mean()
+        return reg_loss + div_loss
 
     def pyx_step(self, batch):
         # TODO (3.4): Implement p(y|x) step.
@@ -262,8 +271,14 @@ class JEM(pl.LightningModule):
     def validation_step(self, batch, batch_idx, dataset_idx=None):
         # Note: batch_idx and dataset_idx not needed (just there for PyTorch
         # Lightning)
-        # TODO (3.4) 
-        pass
+        # TODO (3.4)
+        real, synth = self.cnn(batch[0]), self.cnn(torch.rand_like(batch[0]))*2-1
+        div_loss = (real - synth).mean()
+
+        labels_hat = torch.argmax(real, dim=0)
+        val_acc = torch.sum(batch[1] == labels_hat).item() / (len(batch[1]) * 1.0)
+
+        self.log_dict({'val_loss': div_loss, 'val_acc': val_acc})
 
 
 def run_training(args) -> pl.LightningModule:
@@ -333,7 +348,8 @@ def run_training(args) -> pl.LightningModule:
     return model
 
 
-def run_generation(args, ckpt_path: Union[str, Path], conditional: bool = False):
+#def run_generation(args, ckpt_path: Union[str, Path], conditional: bool = False):
+def run_generation(args, model, conditional: bool = False):
     """
     With a trained model we can synthesize new examples from q_\theta using SGLD.
 
@@ -342,7 +358,7 @@ def run_generation(args, ckpt_path: Union[str, Path], conditional: bool = False)
     :param conditional: flag to specify if we want to generate conditioned on a specific class label or not
     :return: None
     """
-    model = JEM.load_from_checkpoint(ckpt_path)
+    #model = JEM.load_from_checkpoint(ckpt_path)
     model.to(device)
     pl.seed_everything(42)
 
@@ -396,14 +412,15 @@ def run_generation(args, ckpt_path: Union[str, Path], conditional: bool = False)
     plt.savefig(f"{'conditional' if conditional else 'unconditional'}_samples.png")
 
 
-def run_evaluation(args, ckpt_path: Union[str, Path]):
+#def run_evaluation(args, ckpt_path: Union[str, Path]):
+def run_evaluation(args, model):
     """
     Evaluate the predictive performance of the JEM model.
     :param args: hyper-parameter
     :param ckpt_path: local path to the trained checkpoint.
     :return: None
     """
-    model = JEM.load_from_checkpoint(ckpt_path)
+    #model = JEM.load_from_checkpoint(ckpt_path)
     model.to(device)
     pl.seed_everything(42)
 
@@ -462,17 +479,18 @@ if __name__ == '__main__':
     args = parse_args()
 
     # 1) Run training
-    run_training(args)
+    model = run_training(args)
 
     # 2) Evaluate model
-    ckpt_path: str = ""
+    ckpt_path: str = "FelixIstDerBeste.ckpt"
 
     # Classification performance
     run_evaluation(args, ckpt_path)
+    #run_evaluation(args, model)
 
     # Image synthesis
-    # run_generation(args, ckpt_path, conditional=True)
-    # run_generation(args, ckpt_path, conditional=False)
+    run_generation(args, model, conditional=True)
+    run_generation(args, model, conditional=False)
 
     # OOD Analysis
     # run_ood_analysis(args, ckpt_path)
