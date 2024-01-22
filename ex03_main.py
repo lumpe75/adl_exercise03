@@ -6,6 +6,7 @@ import pandas as pd
 import argparse
 from typing import Union, Dict
 import math
+import random
 
 ## Imports for plotting
 import matplotlib.pyplot as plt
@@ -71,8 +72,10 @@ class MCMCSampler:
         self.sample_size = sample_size
         self.num_classes = num_classes
         self.cbuffer_size = cbuffer_size
-        self.full_buffer = self.get_random_dist() * 0.01
-
+        self.index_list = list(range(cbuffer_size))
+        self.full_buffer = []
+        for i in range(cbuffer_size):
+            self.full_buffer.append((torch.randn(*self.img_shape)*0.01).cuda())
         self.cross_entropy_loss = torch.nn.CrossEntropyLoss()
 
     def get_random_dist(self):
@@ -102,13 +105,20 @@ class MCMCSampler:
         # each SGLD procedure. In the class-conditional setting, you want to have individual buffers per class.
         # Please make sure that you keep the buffer finite to not run into memory-related problems.
 
-        nr_from_buffer = round(0.8 * self.sample_size)
-        nr_from_noise = self.sample_size - nr_from_buffer
+        #nr_from_buffer = round(0.8 * self.sample_size)
+        #nr_from_noise = self.sample_size - nr_from_buffer
 
-        from_noise = self.get_random_dist() * 0.01
-        from_noise = from_noise[:nr_from_noise, :, :, :]
-        from_buffer = self.full_buffer[:nr_from_buffer, :, :, :]
-        inp_imgs = torch.concatenate((from_noise, from_buffer), dim=0).detach().cuda()
+        #from_noise = self.get_random_dist() * 0.01
+        #from_noise = from_noise[:nr_from_noise, :, :, :]
+
+        random_indexes = random.sample(range(len(self.index_list)), self.sample_size)
+        buffer_pics = [self.full_buffer[i] for i in random_indexes]
+        for i, _ in enumerate(buffer_pics):
+            if random.random() < 0.2:
+                buffer_pics[i] = (torch.randn(*self.img_shape)*0.01).cuda()
+        inp_imgs = torch.stack(buffer_pics)
+        inp_imgs = inp_imgs.detach().cuda()
+        #inp_imgs = torch.concatenate((from_noise, from_buffer), dim=0).detach().cuda()
 
         # Before MCMC: set model parameters to "required_grad=False"
         # because we are only interested in the gradients of the input.
@@ -139,8 +149,8 @@ class MCMCSampler:
             energy = -self.model(inp_imgs)
             energy.data.requires_grad = True
             energy.sum().backward()
-            inp_imgs.requires_grad = True
-            inp_imgs.sum().backward()
+            #inp_imgs.requires_grad = True
+            #inp_imgs.sum().backward()
             inp_imgs.grad.data.clamp_(-0.03, 0.03)
 
             # (3) Perform gradient ascent to regions of higher probability
@@ -156,6 +166,12 @@ class MCMCSampler:
             # (4) Optional: save (detached) intermediate images in the imgs_per_step variable
             if return_img_per_step:
                 imgs_per_step.append(inp_imgs)
+
+        # refill buffer
+        buffer_pics = torch.split(inp_imgs, 1, dim=0)
+        for i, val in enumerate(random_indexes):
+            #self.full_buffer[val] = buffer_pics[i]
+            self.full_buffer[val] = torch.flatten(buffer_pics[i], end_dim=1)
 
         for p in self.model.parameters():
             p.requires_grad = True
@@ -421,7 +437,7 @@ def run_evaluation(args, model):
     :return: None
     """
     #model = JEM.load_from_checkpoint(ckpt_path)
-    model.to(device)
+    #model.to(device)
     pl.seed_everything(42)
 
     # Datasets & Dataloaders
@@ -485,8 +501,8 @@ if __name__ == '__main__':
     ckpt_path: str = "FelixIstDerBeste.ckpt"
 
     # Classification performance
-    run_evaluation(args, ckpt_path)
-    #run_evaluation(args, model)
+    #run_evaluation(args, ckpt_path)
+    run_evaluation(args, model)
 
     # Image synthesis
     run_generation(args, model, conditional=True)
