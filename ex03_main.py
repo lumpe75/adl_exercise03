@@ -73,7 +73,7 @@ class MCMCSampler:
         self.num_classes = num_classes
         self.cbuffer_size = cbuffer_size
         self.index_list = list(range(cbuffer_size))
-        self.full_buffer = (torch.rand(self.num_classes, self.cbuffer_size, *self.img_shape)*2 - 1).cuda()
+        self.full_buffer = (torch.rand(self.num_classes, self.cbuffer_size, *self.img_shape)*2 - 1)
         self.cross_entropy_loss = torch.nn.CrossEntropyLoss()
 
     def get_random_dist(self):
@@ -102,15 +102,17 @@ class MCMCSampler:
         # (consider saving that into a field of this class). In this buffer, you store the synthesized samples after
         # each SGLD procedure. In the class-conditional setting, you want to have individual buffers per class.
         # Please make sure that you keep the buffer finite to not run into memory-related problems.
-        indices = torch.sort(torch.randint(0, self.cbuffer_size, (self.sample_size,))).values
-        inp_imgs = self.full_buffer[:, indices]
-        random = torch.rand(self.sample_size) > 0.8
+        class_indc = torch.sort(torch.randint(0, self.num_classes, (self.sample_size,))).values
+        sample_indc = torch.sort(torch.randint(0, self.cbuffer_size, (self.sample_size,))).values
+        inp_imgs = self.full_buffer[class_indc, sample_indc]
+        random = (torch.rand(self.sample_size) > 0.8)
         #torch.where(random, inp_imgs[:, random, :, :, :], torch.randn(self.num_classes, random.sum(), *self.img_shape))
-        inp_imgs[:, random, :, :, :] = torch.randn(self.num_classes, random.sum(), *self.img_shape).cuda()
-        inp_imgs = torch.flatten(inp_imgs, 0, 1)
+        inp_imgs[random, :, :, :] = torch.randn(random.sum(), *self.img_shape)
+        #inp_imgs = torch.flatten(inp_imgs, 0, 1)
 
         # Before MCMC: set model parameters to "required_grad=False"
         # because we are only interested in the gradients of the input.
+        inp_imgs = inp_imgs.cuda()
         is_training = self.model.training
         self.model.eval()
         for p in self.model.parameters():
@@ -156,10 +158,10 @@ class MCMCSampler:
             if return_img_per_step:
                 imgs_per_step.append(inp_imgs)
 
-        inp_imgs = torch.unflatten(inp_imgs, dim=0, sizes=(self.num_classes, self.sample_size))
+        #inp_imgs = torch.unflatten(inp_imgs, dim=0, sizes=(self.num_classes, self.sample_size))
 
         # refill buffer
-        self.full_buffer[:, indices, :, :, :] = inp_imgs
+        self.full_buffer[class_indc, sample_indc] = inp_imgs.detach().cpu()
         #    #self.full_buffer[val] = buffer_pics[i]
         #    self.full_buffer[val] = torch.flatten(buffer_pics[i], end_dim=1)
 
@@ -171,9 +173,9 @@ class MCMCSampler:
         if return_img_per_step:
             return torch.stack(imgs_per_step, dim=0)
         else:
-            inp_imgs = torch.flatten(inp_imgs, 0, 1).cpu()
-            out_intic = (torch.sort(torch.randint(0, self.sample_size * self.num_classes, (self.sample_size,))).values).cpu()
-            return inp_imgs[out_intic].cuda()
+            #inp_imgs = torch.flatten(inp_imgs, 0, 1).cpu()
+            #out_intic = (torch.sort(torch.randint(0, self.sample_size * self.num_classes, (self.sample_size,))).values).cpu()
+            return inp_imgs
 
 
 class JEM(pl.LightningModule):
