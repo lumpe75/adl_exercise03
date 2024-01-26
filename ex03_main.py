@@ -42,7 +42,7 @@ def parse_args():
     parser.add_argument('--data_dir', type=str, default="/proj/aimi-adl/GLYPHS/", help='path to directory with glyph image data')
     parser.add_argument('--ckpt_dir', type=str, default="./saved_models", help='path to directory where model checkpoints are stored')
     parser.add_argument('--batch_size', type=int, default=32, help='input batch size for training (default: 32)')
-    parser.add_argument('--num_epochs', type=int, default=1, help='number of epochs to train (default: 120)')
+    parser.add_argument('--num_epochs', type=int, default=3, help='number of epochs to train (default: 120)')
     parser.add_argument('--cbuffer_size', type=int, default=128, help='num. images per class in the sampling reservoir (default: 128)')
     parser.add_argument('--lr', type=float, default=1e-4, help='learning rate (default: 1e-4)')
     parser.add_argument('--lr_gamma', type=float, default=0.97, help='exponentional learning rate decay factor (default: 0.97)')
@@ -105,9 +105,9 @@ class MCMCSampler:
         random = (torch.rand(self.sample_size) > 0.8)
         class_indc = None
         if clabel is None:
-            self.full_buffer = (torch.rand(self.cbuffer_size, *self.img_shape) * 2 - 1)
+            self.full_buffer = (torch.rand(self.sample_size, *self.img_shape) * 2 - 1)
             #class_indc = torch.sort(torch.randint(0, self.num_classes, (self.sample_size,))).values
-            inp_imgs = self.full_buffer[sample_indc]
+            inp_imgs = self.full_buffer
             inp_imgs[random, :, :, :] = torch.randn(random.sum(), *self.img_shape)
         else:
             '''
@@ -176,7 +176,10 @@ class MCMCSampler:
         #inp_imgs = torch.unflatten(inp_imgs, dim=0, sizes=(self.num_classes, self.sample_size))
 
         # refill buffer
-        self.full_buffer[class_indc, sample_indc] = inp_imgs.detach().cpu()
+        if clabel is None:
+            self.full_buffer = inp_imgs.detach().cpu()
+        else:
+            self.full_buffer[class_indc, sample_indc] = inp_imgs.detach().cpu()
         #    #self.full_buffer[val] = buffer_pics[i]
         #    self.full_buffer[val] = torch.flatten(buffer_pics[i], end_dim=1)
 
@@ -264,7 +267,7 @@ class JEM(pl.LightningModule):
                                               gamma=self.hparams.lr_gamma)
         return [optimizer], [scheduler]
 
-    def px_step(self, batch, ccond_sample=True):
+    def px_step(self, batch):
         # TODO (3.4): Implement p(x) step.
         # In addition to calculating the contrastive loss, also consider using an L2 regularization loss. This allows us
         # to constrain the Lipshitz constant by penalizes too large energies and makes sure that the energiers maintain
@@ -274,9 +277,12 @@ class JEM(pl.LightningModule):
         #         cdiv_loss = ...
         #         loss = reg_loss + cdiv_loss
         cond_samples = None
-        if ccond_sample:
+        if self.ccond_sample:
             cond_samples = batch[1]
-        real, synth = self.cnn(batch[0]), self.cnn(self.sampler.synthesize_samples(clabel=cond_samples))  #TODO maybe add noise?
+        small_noise = torch.randn_like(batch[0]) * 0.005
+        inp_imgs = batch[0].clone().add_(small_noise).clamp_(min=-1.0, max=1.0)
+        real = self.cnn(inp_imgs)
+        synth = self.cnn(self.sampler.synthesize_samples(clabel=cond_samples))  #TODO maybe add noise?
         reg_loss, div_loss = self.hparams.alpha * (real ** 2 + synth ** 2).mean(), (real - synth).mean()
         return reg_loss + div_loss
 
@@ -402,8 +408,7 @@ def run_generation(args, model, conditional: bool = False):
     k = 8
     bs = 8
     num_steps = 256
-    #conditional_labels = [1, 4, 5, 10, 17, 18, 39, 23]
-    conditional_labels = [4, 5, 8, 9, 14, 15, 16, 17]
+    conditional_labels = [1, 2, 3, 4, 5, 6, 7, 8]
 
     synth_imgs = []
     for label in tqdm.tqdm(conditional_labels):
