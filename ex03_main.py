@@ -1,6 +1,5 @@
 ## Standard libraries
 import os
-import numpy as np
 import tqdm
 import pandas as pd
 import argparse
@@ -73,7 +72,7 @@ class MCMCSampler:
         self.num_classes = num_classes
         self.cbuffer_size = cbuffer_size
         self.index_list = list(range(cbuffer_size))
-        self.full_buffer = (torch.rand(self.num_classes, self.cbuffer_size, *self.img_shape)*2 - 1)
+        self.full_buffer = None
         self.cross_entropy_loss = torch.nn.CrossEntropyLoss()
 
     def get_random_dist(self):
@@ -102,12 +101,28 @@ class MCMCSampler:
         # (consider saving that into a field of this class). In this buffer, you store the synthesized samples after
         # each SGLD procedure. In the class-conditional setting, you want to have individual buffers per class.
         # Please make sure that you keep the buffer finite to not run into memory-related problems.
-        class_indc = torch.sort(torch.randint(0, self.num_classes, (self.sample_size,))).values
         sample_indc = torch.sort(torch.randint(0, self.cbuffer_size, (self.sample_size,))).values
-        inp_imgs = self.full_buffer[class_indc, sample_indc]
         random = (torch.rand(self.sample_size) > 0.8)
+        class_indc = None
+        if clabel is None:
+            self.full_buffer = (torch.rand(self.cbuffer_size, *self.img_shape) * 2 - 1)
+            #class_indc = torch.sort(torch.randint(0, self.num_classes, (self.sample_size,))).values
+            inp_imgs = self.full_buffer[sample_indc]
+            inp_imgs[random, :, :, :] = torch.randn(random.sum(), *self.img_shape)
+        else:
+            '''
+            self.full_buffer = (torch.rand(self.num_classes, self.cbuffer_size, *self.img_shape) * 2 - 1)
+            class_indc = clabel
+            inp_imgs = self.full_buffer[class_indc, sample_indc]
+            inp_imgs[random, :, :, :] = torch.randn(random.sum(), *self.img_shape)'''
+            self.full_buffer = (torch.rand(self.num_classes, self.cbuffer_size, *self.img_shape) * 2 - 1)
+            #class_indc = torch.sort(torch.randint(0, self.num_classes, (self.sample_size,))).values
+            class_indc = clabel.cpu()
+            inp_imgs = self.full_buffer[class_indc, sample_indc]
+            inp_imgs[random, :, :, :] = torch.randn(random.sum(), *self.img_shape)
+
         #torch.where(random, inp_imgs[:, random, :, :, :], torch.randn(self.num_classes, random.sum(), *self.img_shape))
-        inp_imgs[random, :, :, :] = torch.randn(random.sum(), *self.img_shape)
+
         #inp_imgs = torch.flatten(inp_imgs, 0, 1)
 
         # Before MCMC: set model parameters to "required_grad=False"
@@ -130,14 +145,14 @@ class MCMCSampler:
         for _ in range(steps):
             # (1) Add small noise to the input 'inp_imgs' (which are normalized to a range of -1 to 1).
             # This corresponds to the Brownian noise that allows to explore the entire parameter space.
-            epsilon_noise = torch.randn_like(inp_imgs).cuda()
+            inp_imgs.data.add((torch.randn_like(inp_imgs).cuda())*0.005)
             inp_imgs.data.clamp_(min=-1.0, max=1.0)
 
             # (2) Calculate gradient-based score function at the current step. In case of the JEM implementation AND
             # class-conditional sampling (which is optional from a methodological point of view), make sure that you
             # plug in some label information as well as we want to calculate E(x,y) and not only E(x).
 
-            energy = -self.model(inp_imgs)
+            energy = -self.model(inp_imgs, clabel)
             energy.data.requires_grad = True
             energy.sum().backward()
             #inp_imgs.requires_grad = True
@@ -148,15 +163,15 @@ class MCMCSampler:
             # (gradient descent if we consider the energy surface!). You can use the parameter 'step_size' which can be
             # considered the learning rate of the SGLD update.
 
-            #inp_imgs = inp_imgs.data - (step_size/2) * inp_imgs.grad.data + epsilon_noise
-            inp_imgs.data.add_(-(step_size / 2) * inp_imgs.grad.data + epsilon_noise)
+            #inp_imgs.data.add_(-(step_size / 2) * inp_imgs.grad.data)
+            inp_imgs.data.add_(-step_size * inp_imgs.grad.data)
             inp_imgs.grad.detach_()
             inp_imgs.grad.zero_()
             inp_imgs.data.clamp_(-1.0, 1.0)
 
             # (4) Optional: save (detached) intermediate images in the imgs_per_step variable
             if return_img_per_step:
-                imgs_per_step.append(inp_imgs)
+                imgs_per_step.append(inp_imgs.clone().detach())
 
         #inp_imgs = torch.unflatten(inp_imgs, dim=0, sizes=(self.num_classes, self.sample_size))
 
@@ -258,7 +273,10 @@ class JEM(pl.LightningModule):
         #         reg_loss = self.hparams.alpha * (real_out ** 2 + synth_out ** 2).mean()
         #         cdiv_loss = ...
         #         loss = reg_loss + cdiv_loss
-        real, synth = self.cnn(batch[0]), self.cnn(self.sampler.synthesize_samples())  #TODO maybe add noise?
+        cond_samples = None
+        if ccond_sample:
+            cond_samples = batch[1]
+        real, synth = self.cnn(batch[0]), self.cnn(self.sampler.synthesize_samples(clabel=cond_samples))  #TODO maybe add noise?
         reg_loss, div_loss = self.hparams.alpha * (real ** 2 + synth ** 2).mean(), (real - synth).mean()
         return reg_loss + div_loss
 
@@ -283,7 +301,7 @@ class JEM(pl.LightningModule):
         # Lightning)
         # TODO (3.4)
         real, synth = self.cnn(batch[0]), self.cnn(torch.rand_like(batch[0]))*2-1
-        div_loss = (real - synth).mean()
+        div_loss = real.mean() - synth.mean()
 
         labels_hat = torch.argmax(real, dim=0)
         val_acc = torch.sum(batch[1] == labels_hat).item() / (len(batch[1]) * 1.0)
@@ -384,7 +402,8 @@ def run_generation(args, model, conditional: bool = False):
     k = 8
     bs = 8
     num_steps = 256
-    conditional_labels = [1, 4, 5, 10, 17, 18, 39, 23]
+    #conditional_labels = [1, 4, 5, 10, 17, 18, 39, 23]
+    conditional_labels = [4, 5, 8, 9, 14, 15, 16, 17]
 
     synth_imgs = []
     for label in tqdm.tqdm(conditional_labels):
